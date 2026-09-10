@@ -1,0 +1,223 @@
+name: One-shot Mixed-Grid key-bias implementation
+
+on:
+  push:
+    branches:
+      - mirror/mixed-grid-key-bias-20260910
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply HIP parity and shared contract tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Shared HIP declaration. This is the authoritative C-linkage declaration
+          # used by both the binding and the orchestration TU.
+          p = 'comfy_kitchen/backends/hip/launchers.h'
+          replace_once(
+              p,
+              'void sol_producer_chunk(void* workspace, const void* qkv, const void* fab, const void* qw,\n'
+              '                        const void* kw, const void* kmean, const void* vscale, const void* blen,\n'
+              '                        float rope_eps, int rot_dim, int t0, int M, int batch, int seq_len,\n'
+              '                        int num_heads, int n_tok, hipStream_t stream);',
+              'void sol_producer_chunk(void* workspace, const void* qkv, const void* fab, const void* qw,\n'
+              '                        const void* kw, const void* kmean, const void* vscale,\n'
+              '                        const void* key_bias, const void* blen, float rope_eps, int rot_dim,\n'
+              '                        int t0, int M, int batch, int seq_len, int num_heads, int n_tok,\n'
+              '                        hipStream_t stream);')
+
+          # HIP fused producer: inject bias at exactly the same K quantization
+          # carrier as the direct path. Pooled K/V statistics remain unweighted.
+          p = 'comfy_kitchen/backends/hip/sage_attention/sol_attn_producer.hip'
+          replace_once(
+              p,
+              '    const float* __restrict__ kmean,   // [H, HD] stale (may be zeros)\n'
+              '    const float* __restrict__ vscale,  // [H, HD] stale V scale\n'
+              '    int8_t* __restrict__ qi, float* __restrict__ qs, int8_t* __restrict__ ki,',
+              '    const float* __restrict__ kmean,   // [H, HD] stale (may be zeros)\n'
+              '    const float* __restrict__ vscale,  // [H, HD] stale V scale\n'
+              '    const float* __restrict__ key_bias,  // [T] log2 key bias, or null\n'
+              '    int8_t* __restrict__ qi, float* __restrict__ qs, int8_t* __restrict__ ki,')
+          replace_once(
+              p,
+              '    quant_k_rows(sT, len, kmean + static_cast<size_t>(h) * HD, nullptr, ki + dst0 * HD,\n'
+              '                 ksb + dst0);',
+              '    quant_k_rows(sT, len, kmean + static_cast<size_t>(h) * HD,\n'
+              '                 key_bias ? key_bias + tb0 : nullptr, ki + dst0 * HD, ksb + dst0);')
+          replace_once(
+              p,
+              'void launch_sol_producer(const void* qkv, const void* fab, const void* qw, const void* kw,\n'
+              '                         const void* kmean, const void* vscale, void* qi, void* qs, void* ki,',
+              'void launch_sol_producer(const void* qkv, const void* fab, const void* qw, const void* kw,\n'
+              '                         const void* kmean, const void* vscale, const void* key_bias,\n'
+              '                         void* qi, void* qs, void* ki,')
+          replace_once(
+              p,
+              '        static_cast<const float*>(kmean), static_cast<const float*>(vscale),\n'
+              '        static_cast<int8_t*>(qi), static_cast<float*>(qs), static_cast<int8_t*>(ki),',
+              '        static_cast<const float*>(kmean), static_cast<const float*>(vscale),\n'
+              '        static_cast<const float*>(key_bias), static_cast<int8_t*>(qi),\n'
+              '        static_cast<float*>(qs), static_cast<int8_t*>(ki),')
+
+          # HIP orchestration: keep the C entry in lockstep with launchers.h and
+          # the producer TU so prototype drift is compile-visible.
+          p = 'comfy_kitchen/backends/hip/sage_attention/sol_attn.hip'
+          replace_once(
+              p,
+              'void launch_sol_producer(const void*, const void*, const void*, const void*, const void*,\n'
+              '                         const void*, void*, void*, void*, void*, void*, void*, void*, void*,\n'
+              '                         void*, void*, void*, void*, const void*, float, int, int, int, int, int,\n'
+              '                         int, int, int, hipStream_t);',
+              'void launch_sol_producer(const void*, const void*, const void*, const void*, const void*,\n'
+              '                         const void*, const void*, void*, void*, void*, void*, void*, void*,\n'
+              '                         void*, void*, void*, void*, void*, void*, const void*, float, int, int,\n'
+              '                         int, int, int, int, int, int, hipStream_t);')
+          replace_once(
+              p,
+              'extern "C" void sol_producer_chunk(void* workspace, const void* qkv, const void* fab,\n'
+              '                                   const void* qw, const void* kw, const void* kmean,\n'
+              '                                   const void* vscale, const void* blen, float rope_eps,\n'
+              '                                   int rot_dim, int t0, int M, int batch, int seq_len,\n'
+              '                                   int num_heads, int n_tok, hipStream_t stream) {',
+              'extern "C" void sol_producer_chunk(void* workspace, const void* qkv, const void* fab,\n'
+              '                                   const void* qw, const void* kw, const void* kmean,\n'
+              '                                   const void* vscale, const void* key_bias, const void* blen,\n'
+              '                                   float rope_eps, int rot_dim, int t0, int M, int batch,\n'
+              '                                   int seq_len, int num_heads, int n_tok, hipStream_t stream) {')
+          replace_once(
+              p,
+              '    launch_sol_producer(qkv, fab, qw, kw, kmean, vscale, w + p.qiP, w + p.qs, w + p.kiP,\n'
+              '                        w + p.ksb, w + p.vTi, n_tok ? w + p.vRow : nullptr, w + p.vcT,',
+              '    launch_sol_producer(qkv, fab, qw, kw, kmean, vscale, key_bias, w + p.qiP, w + p.qs,\n'
+              '                        w + p.kiP, w + p.ksb, w + p.vTi,\n'
+              '                        n_tok ? w + p.vRow : nullptr, w + p.vcT,')
+
+          # HIP binding: optional pointer is appended after token_aug to preserve
+          # existing positional calls. sol_need_elems pins float32 + contiguous
+          # storage, preventing a wrong raw-device-pointer interpretation.
+          p = 'comfy_kitchen/backends/hip/dlpack_bindings.cpp'
+          replace_once(
+              p,
+              '                           uintptr_t stream_ptr, OptArray block_len = std::nullopt,\n'
+              '                           int64_t token_aug = 0) {',
+              '                           uintptr_t stream_ptr, OptArray block_len = std::nullopt,\n'
+              '                           int64_t token_aug = 0, OptArray key_bias = std::nullopt) {')
+          replace_once(
+              p,
+              '    sol_need_elems(vscale, batch * num_heads * 128, 0, kFn, "vscale");\n'
+              '    sol_producer_chunk(workspace.data(), qkv.data(), fab.data(), qw.data(), kw.data(),\n'
+              '                       kmean.data(), vscale.data(), opt_data(block_len), rope_eps,',
+              '    sol_need_elems(vscale, batch * num_heads * 128, 0, kFn, "vscale");\n'
+              '    if (key_bias) sol_need_elems(*key_bias, batch * seq_len, 0, kFn, "key_bias");\n'
+              '    sol_producer_chunk(workspace.data(), qkv.data(), fab.data(), qw.data(), kw.data(),\n'
+              '                       kmean.data(), vscale.data(), opt_data(key_bias), opt_data(block_len),\n'
+              '                       rope_eps,')
+          replace_once(
+              p,
+              '          nb::arg("stream_ptr"), nb::arg("block_len") = nb::none(),\n'
+              '          nb::arg("token_aug") = 0);',
+              '          nb::arg("stream_ptr"), nb::arg("block_len") = nb::none(),\n'
+              '          nb::arg("token_aug") = 0, nb::arg("key_bias") = nb::none());')
+
+          # HIP Python API: match CUDA/direct semantics: user bias is natural-log,
+          # normalize once to [1,T] float32, convert once to log2 units, and feed
+          # every producer pass (bootstrap and primed).
+          p = 'comfy_kitchen/backends/hip/__init__.py'
+          replace_once(
+              p,
+              '    sink_blocks: list[int] | None = None,\n'
+              '    sink_q: list[int] | None = None,\n'
+              '    rope_eps: float = 1e-6,',
+              '    sink_blocks: list[int] | None = None,\n'
+              '    sink_q: list[int] | None = None,\n'
+              '    key_bias: torch.Tensor | None = None,\n'
+              '    rope_eps: float = 1e-6,')
+          replace_once(
+              p,
+              '    ``tail`` / ``block_len`` / ``coarse_gate`` / ``token_aug`` as in ``sol_attn``.\n\n'
+              '    ``qkv_chunks``: an iterable of chunks or a zero-arg callable returning one.',
+              '    ``tail`` / ``block_len`` / ``coarse_gate`` / ``token_aug`` as in ``sol_attn``.\n'
+              '    ``key_bias`` is natural-log per-key score bias consumed only by exact blocks;\n'
+              '    every biased key block must therefore be sink-routed.\n\n'
+              '    ``qkv_chunks``: an iterable of chunks or a zero-arg callable returning one.')
+          replace_once(
+              p,
+              '    stream = torch.cuda.current_stream(dev).cuda_stream\n'
+              '    width = 3 * h * d\n\n'
+              '    def produce(km, vsc):',
+              '    stream = torch.cuda.current_stream(dev).cuda_stream\n'
+              '    width = 3 * h * d\n'
+              '    kb = None\n'
+              '    if key_bias is not None:\n'
+              '        kb = _normalize_key_bias(key_bias, 1, t, dev)\n'
+              '        kb = (kb * _LOG2E).expand(1, t).contiguous()\n\n'
+              '    def produce(km, vsc):')
+          replace_once(
+              p,
+              '                block_len=None if block_len is None else _dl(block_len),\n'
+              '                token_aug=int(token_aug))',
+              '                block_len=None if block_len is None else _dl(block_len),\n'
+              '                token_aug=int(token_aug),\n'
+              '                key_bias=None if kb is None else _dl(kb))')
+
+          # Shared contract tests run against whichever fused backend is built.
+          p = 'tests/test_sol_attn.py'
+          text = Path(p).read_text()
+          anchor = '@pytest.mark.parametrize("rot", [64, 96])\ndef test_chunked_producer_matches_separate_rope(rot):\n'
+          pos = text.find(anchor)
+          if pos < 0:
+              raise SystemExit(f'{p}: chunked producer test anchor missing')
+          tests = '''def test_chunked_key_bias_matches_separate_rope():\n    """Chunked fused-QKV carries natural-log key bias into exact K blocks."""\n    c = _chunked_case(seed=23, rot=96, v_scale=0.02)\n    bias = torch.zeros(c["t"], device="cuda")\n    bias[64:192] = math.log(0.37)\n    sinks = [1, 3]\n    ref = backend.sol_attn(\n        c["q"], c["k"], c["v"], tau=1.4, key_bias=bias, sink_blocks=sinks\n    )\n    cold, km, vs = backend.sol_attn_chunked(\n        c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n        tau=1.4, key_bias=bias, sink_blocks=sinks\n    )\n    primed, _, _ = backend.sol_attn_chunked(\n        c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n        kmean=km, vscale=vs, tau=1.4, key_bias=bias, sink_blocks=sinks\n    )\n    plain, _, _ = backend.sol_attn_chunked(\n        c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n        kmean=km, vscale=vs, tau=1.4, sink_blocks=sinks\n    )\n    assert _cos(cold, ref) > 0.995\n    assert _cos(primed, ref) > 0.995\n    assert not torch.equal(primed, plain)\n\n\ndef test_chunked_key_bias_bad_shape_rejected_before_production():\n    c = _chunked_case(seed=29, rot=96, v_scale=0.02)\n    with pytest.raises(ValueError, match="key_bias"):\n        backend.sol_attn_chunked(\n            c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n            key_bias=torch.zeros(c["t"] - 1, device="cuda"), sink_blocks=[0, 1]\n        )\n\n\n'''
+          if 'def test_chunked_key_bias_matches_separate_rope()' in text:
+              raise SystemExit(f'{p}: chunked key-bias tests already present unexpectedly')
+          Path(p).write_text(text[:pos] + tests + text[pos:])
+          PY
+      - name: Static validation
+        shell: bash
+        run: |
+          python -m py_compile comfy_kitchen/backends/cuda/__init__.py comfy_kitchen/backends/hip/__init__.py tests/test_sol_attn.py
+          git diff --check
+          python - <<'PY'
+          from pathlib import Path
+          cuda = Path('comfy_kitchen/backends/cuda/sage_attention/sol_attn_producer.cu').read_text()
+          hip = Path('comfy_kitchen/backends/hip/sage_attention/sol_attn_producer.hip').read_text()
+          assert cuda.count('const float* __restrict__ key_bias') == 1, cuda.count('const float* __restrict__ key_bias')
+          assert hip.count('const float* __restrict__ key_bias') == 1, hip.count('const float* __restrict__ key_bias')
+          assert 'key_bias ? key_bias + tb0 : nullptr' in cuda
+          assert 'key_bias ? key_bias + tb0 : nullptr' in hip
+          PY
+      - name: Commit implementation and remove harness
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/mixed-grid-key-bias-once.yml
+          git add comfy_kitchen/backends/hip/launchers.h \
+                  comfy_kitchen/backends/hip/__init__.py \
+                  comfy_kitchen/backends/hip/dlpack_bindings.cpp \
+                  comfy_kitchen/backends/hip/sage_attention/sol_attn.hip \
+                  comfy_kitchen/backends/hip/sage_attention/sol_attn_producer.hip \
+                  tests/test_sol_attn.py
+          git commit -m 'Add chunked Sol-Attn key bias parity'
+          git push origin HEAD:mirror/mixed-grid-key-bias-20260910
