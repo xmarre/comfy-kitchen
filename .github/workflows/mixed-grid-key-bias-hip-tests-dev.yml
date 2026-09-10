@@ -1,0 +1,162 @@
+name: Mixed-Grid key-bias HIP and tests development transform
+
+on:
+  push:
+    branches:
+      - mirror/mixed-grid-key-bias-20260910
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply exact HIP and test transformations
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count == 0 and new in text:
+                  return
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one old fragment, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          p = 'comfy_kitchen/backends/hip/sage_attention/sol_attn_producer.hip'
+          replace_once(p,
+              '    const float* __restrict__ kmean,   // [H, HD] stale (may be zeros)\n'
+              '    const float* __restrict__ vscale,  // [H, HD] stale V scale\n',
+              '    const float* __restrict__ kmean,   // [H, HD] stale (may be zeros)\n'
+              '    const float* __restrict__ vscale,  // [H, HD] stale V scale\n'
+              '    const float* __restrict__ key_bias,  // [T] log2 key bias, or null\n')
+          replace_once(p,
+              '    quant_k_rows(sT, len, kmean + static_cast<size_t>(h) * HD, nullptr, ki + dst0 * HD,\n'
+              '                 ksb + dst0);',
+              '    quant_k_rows(sT, len, kmean + static_cast<size_t>(h) * HD,\n'
+              '                 key_bias ? key_bias + tb0 : nullptr, ki + dst0 * HD, ksb + dst0);')
+          replace_once(p,
+              'void launch_sol_producer(const void* qkv, const void* fab, const void* qw, const void* kw,\n'
+              '                         const void* kmean, const void* vscale, void* qi, void* qs, void* ki,\n',
+              'void launch_sol_producer(const void* qkv, const void* fab, const void* qw, const void* kw,\n'
+              '                         const void* kmean, const void* vscale, const void* key_bias,\n'
+              '                         void* qi, void* qs, void* ki,\n')
+          replace_once(p,
+              '        static_cast<const float*>(kmean), static_cast<const float*>(vscale),\n'
+              '        static_cast<int8_t*>(qi), static_cast<float*>(qs), static_cast<int8_t*>(ki),\n',
+              '        static_cast<const float*>(kmean), static_cast<const float*>(vscale),\n'
+              '        static_cast<const float*>(key_bias), static_cast<int8_t*>(qi), static_cast<float*>(qs),\n'
+              '        static_cast<int8_t*>(ki),\n')
+
+          p = 'comfy_kitchen/backends/hip/sage_attention/sol_attn.hip'
+          replace_once(p,
+              'void launch_sol_producer(const void*, const void*, const void*, const void*, const void*,\n'
+              '                         const void*, void*, void*, void*, void*, void*, void*, void*, void*,\n',
+              'void launch_sol_producer(const void*, const void*, const void*, const void*, const void*,\n'
+              '                         const void*, const void*, void*, void*, void*, void*, void*, void*, void*, void*,\n')
+          replace_once(p,
+              'extern "C" void sol_producer_chunk(void* workspace, const void* qkv, const void* fab,\n'
+              '                                   const void* qw, const void* kw, const void* kmean,\n'
+              '                                   const void* vscale, const void* blen, float rope_eps,\n',
+              'extern "C" void sol_producer_chunk(void* workspace, const void* qkv, const void* fab,\n'
+              '                                   const void* qw, const void* kw, const void* kmean,\n'
+              '                                   const void* vscale, const void* key_bias, const void* blen, float rope_eps,\n')
+          replace_once(p,
+              '    launch_sol_producer(qkv, fab, qw, kw, kmean, vscale, w + p.qiP, w + p.qs, w + p.kiP,\n',
+              '    launch_sol_producer(qkv, fab, qw, kw, kmean, vscale, key_bias, w + p.qiP, w + p.qs, w + p.kiP,\n')
+
+          p = 'comfy_kitchen/backends/hip/dlpack_bindings.cpp'
+          replace_once(p,
+              'void sol_producer_chunk(void*, const void*, const void*, const void*, const void*, const void*,\n'
+              '                        const void*, const void*, float, int, int, int, int, int, int, int, hipStream_t);',
+              'void sol_producer_chunk(void*, const void*, const void*, const void*, const void*, const void*,\n'
+              '                        const void*, const void*, const void*, float, int, int, int, int, int, int, int, hipStream_t);')
+          replace_once(p,
+              '                           uintptr_t stream_ptr, OptArray block_len = std::nullopt,\n'
+              '                           int64_t token_aug = 0) {',
+              '                           uintptr_t stream_ptr, OptArray block_len = std::nullopt,\n'
+              '                           int64_t token_aug = 0, OptArray key_bias = std::nullopt) {')
+          replace_once(p,
+              '    sol_need_elems(vscale, batch * num_heads * 128, 0, kFn, "vscale");\n'
+              '    sol_producer_chunk(workspace.data(), qkv.data(), fab.data(), qw.data(), kw.data(),\n'
+              '                       kmean.data(), vscale.data(), opt_data(block_len), rope_eps,\n',
+              '    sol_need_elems(vscale, batch * num_heads * 128, 0, kFn, "vscale");\n'
+              '    if (key_bias) sol_need_elems(*key_bias, batch * seq_len, 0, kFn, "key_bias");\n'
+              '    sol_producer_chunk(workspace.data(), qkv.data(), fab.data(), qw.data(), kw.data(),\n'
+              '                       kmean.data(), vscale.data(), opt_data(key_bias), opt_data(block_len), rope_eps,\n')
+          replace_once(p,
+              '          nb::arg("stream_ptr"), nb::arg("block_len") = nb::none(),\n'
+              '          nb::arg("token_aug") = 0);',
+              '          nb::arg("stream_ptr"), nb::arg("block_len") = nb::none(),\n'
+              '          nb::arg("token_aug") = 0, nb::arg("key_bias") = nb::none());')
+
+          p = 'comfy_kitchen/backends/hip/__init__.py'
+          replace_once(p,
+              '    sink_blocks: list[int] | None = None,\n'
+              '    sink_q: list[int] | None = None,\n'
+              '    rope_eps: float = 1e-6,\n',
+              '    sink_blocks: list[int] | None = None,\n'
+              '    sink_q: list[int] | None = None,\n'
+              '    key_bias: torch.Tensor | None = None,\n'
+              '    rope_eps: float = 1e-6,\n')
+          replace_once(p,
+              '    width = 3 * h * d\n\n'
+              '    def produce(km, vsc):\n',
+              '    width = 3 * h * d\n'
+              '    kb = None\n'
+              '    if key_bias is not None:\n'
+              '        # exact branch only, in log2 units; biased blocks must be sink-covered\n'
+              '        kb = _normalize_key_bias(key_bias, 1, t, dev)\n'
+              '        kb = (kb * _LOG2E).expand(1, t).contiguous()\n\n'
+              '    def produce(km, vsc):\n')
+          replace_once(p,
+              '                block_len=None if block_len is None else _dl(block_len),\n'
+              '                token_aug=int(token_aug))\n',
+              '                block_len=None if block_len is None else _dl(block_len),\n'
+              '                token_aug=int(token_aug),\n'
+              '                key_bias=None if kb is None else _dl(kb))\n')
+          replace_once(p,
+              '    ``tail`` / ``block_len`` / ``coarse_gate`` / ``token_aug`` as in ``sol_attn``.\n\n'
+              '    ``qkv_chunks``: an iterable of chunks or a zero-arg callable returning one.\n',
+              '    ``tail`` / ``block_len`` / ``coarse_gate`` / ``token_aug`` as in ``sol_attn``.\n'
+              '    ``key_bias`` is natural-log per-key score bias and is consumed only by\n'
+              '    exact blocks; every biased key block must therefore be sink-routed.\n\n'
+              '    ``qkv_chunks``: an iterable of chunks or a zero-arg callable returning one.\n')
+
+          p = 'tests/test_sol_attn.py'
+          text = Path(p).read_text()
+          if 'def test_chunked_key_bias_matches_separate_rope()' not in text:
+              anchor = '@pytest.mark.parametrize("rot", [64, 96])\ndef test_chunked_producer_matches_separate_rope(rot):\n'
+              pos = text.find(anchor)
+              if pos < 0:
+                  raise SystemExit(f'{p}: chunked test insertion anchor not found')
+              tests = '''def test_chunked_key_bias_matches_separate_rope():\n    """Chunked fused-QKV must carry natural-log key bias into exact K blocks."""\n    c = _chunked_case(seed=23, rot=96, v_scale=0.02)\n    bias = torch.zeros(c["t"], device="cuda")\n    bias[64:192] = math.log(0.37)\n    sinks = [1, 3]\n    ref = backend.sol_attn(\n        c["q"], c["k"], c["v"], tau=1.4, key_bias=bias, sink_blocks=sinks\n    )\n    got, km, vs = backend.sol_attn_chunked(\n        c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n        tau=1.4, key_bias=bias, sink_blocks=sinks\n    )\n    primed, _, _ = backend.sol_attn_chunked(\n        c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n        kmean=km, vscale=vs, tau=1.4, key_bias=bias, sink_blocks=sinks\n    )\n    plain, _, _ = backend.sol_attn_chunked(\n        c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n        kmean=km, vscale=vs, tau=1.4, sink_blocks=sinks\n    )\n    assert _cos(got, ref) > 0.995\n    assert _cos(primed, ref) > 0.995\n    assert not torch.equal(primed, plain)\n\n\ndef test_chunked_key_bias_bad_shape_rejected_before_production():\n    c = _chunked_case(seed=29, rot=96, v_scale=0.02)\n    with pytest.raises(ValueError, match="key_bias"):\n        backend.sol_attn_chunked(\n            c["chunks"], c["t"], c["h"], c["freqs"], c["norm"],\n            key_bias=torch.zeros(c["t"] - 1, device="cuda"), sink_blocks=[0, 1]\n        )\n\n\n'''
+              Path(p).write_text(text[:pos] + tests + text[pos:])
+          PY
+      - name: Static validation
+        run: |
+          python -m py_compile comfy_kitchen/backends/hip/__init__.py tests/test_sol_attn.py
+          git diff --check
+      - name: Commit transformed HIP and tests
+        run: |
+          if git diff --quiet -- . ':(exclude).github/workflows/mixed-grid-key-bias-cuda-dev.yml' ':(exclude).github/workflows/mixed-grid-key-bias-hip-tests-dev.yml'; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add comfy_kitchen/backends/hip/__init__.py \
+                  comfy_kitchen/backends/hip/dlpack_bindings.cpp \
+                  comfy_kitchen/backends/hip/sage_attention/sol_attn.hip \
+                  comfy_kitchen/backends/hip/sage_attention/sol_attn_producer.hip \
+                  tests/test_sol_attn.py
+          git commit -m 'Add key bias to HIP chunked Sol-Attn producer and tests'
+          git push origin HEAD:mirror/mixed-grid-key-bias-20260910
