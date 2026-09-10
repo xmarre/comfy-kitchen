@@ -44,6 +44,7 @@ __global__ void sol_producer_kernel(
     const float* __restrict__ kmean,         // [H, HD] stale (may be zeros)
     const float* __restrict__ vscale,        // [H, HD] stale V scale (may be ~0 -> margin)
     const float* __restrict__ key_bias,      // [T] log2 key bias, or null
+    const float* __restrict__ key_bias,      // [T] log2 key bias, or null
     int8_t* __restrict__ qiP, float* __restrict__ qs,
     int8_t* __restrict__ kiP, float2* __restrict__ ksb,
     int8_t* __restrict__ vTi, int8_t* __restrict__ vRow, __nv_bfloat16* __restrict__ vcT,
