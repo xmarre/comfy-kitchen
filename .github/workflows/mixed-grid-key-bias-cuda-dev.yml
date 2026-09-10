@@ -1,0 +1,154 @@
+name: Mixed-Grid key-bias CUDA development transform
+
+on:
+  push:
+    branches:
+      - mirror/mixed-grid-key-bias-20260910
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply exact CUDA source transformations
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count == 0 and new in text:
+                  return
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one old fragment, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          p = 'comfy_kitchen/backends/cuda/sage_attention/sol_attn_producer.cu'
+          replace_once(p,
+              '    const float* __restrict__ kmean,         // [H, HD] stale (may be zeros)\n'
+              '    const float* __restrict__ vscale,        // [H, HD] stale V scale (may be ~0 -> margin)\n',
+              '    const float* __restrict__ kmean,         // [H, HD] stale (may be zeros)\n'
+              '    const float* __restrict__ vscale,        // [H, HD] stale V scale (may be ~0 -> margin)\n'
+              '    const float* __restrict__ key_bias,      // [T] log2 key bias, or null\n')
+          replace_once(p,
+              '    quant_k_rows(sT, len, kmean + (size_t)h * HD, nullptr, kiP + dst0 * HD, ksb + dst0);',
+              '    quant_k_rows(sT, len, kmean + (size_t)h * HD,\n'
+              '                 key_bias ? key_bias + tb0 : nullptr, kiP + dst0 * HD, ksb + dst0);')
+          replace_once(p,
+              '    const void* kmean, const void* vscale,\n'
+              '    void* qiP, void* qs, void* kiP, void* ksb, void* vTi, void* vRow, void* vcT,\n',
+              '    const void* kmean, const void* vscale, const void* key_bias,\n'
+              '    void* qiP, void* qs, void* kiP, void* ksb, void* vTi, void* vRow, void* vcT,\n')
+          replace_once(p,
+              '        (const float*)kmean, (const float*)vscale,\n'
+              '        (int8_t*)qiP, (float*)qs, (int8_t*)kiP, (float2*)ksb,\n',
+              '        (const float*)kmean, (const float*)vscale, (const float*)key_bias,\n'
+              '        (int8_t*)qiP, (float*)qs, (int8_t*)kiP, (float2*)ksb,\n')
+
+          p = 'comfy_kitchen/backends/cuda/sage_attention/sol_attn.cu'
+          replace_once(p,
+              'void launch_sol_producer(const void*, const void*, const void*, const void*,\n'
+              '                         const void*, const void*, void*, void*, void*, void*,\n',
+              'void launch_sol_producer(const void*, const void*, const void*, const void*,\n'
+              '                         const void*, const void*, const void*, void*, void*, void*, void*,\n')
+          replace_once(p,
+              '    const void* qw, const void* kw, const void* kmean, const void* vscale,\n'
+              '    const void* blen, float rope_eps, int rot_dim, int t0, int M,\n',
+              '    const void* qw, const void* kw, const void* kmean, const void* vscale,\n'
+              '    const void* key_bias, const void* blen, float rope_eps, int rot_dim, int t0, int M,\n')
+          replace_once(p,
+              '    launch_sol_producer(qkv, fab, qw, kw, kmean, vscale,\n'
+              '                        w + p.qiP, w + p.qs, w + p.kiP, w + p.ksb,\n',
+              '    launch_sol_producer(qkv, fab, qw, kw, kmean, vscale, key_bias,\n'
+              '                        w + p.qiP, w + p.qs, w + p.kiP, w + p.ksb,\n')
+
+          p = 'comfy_kitchen/backends/cuda/dlpack_bindings.cpp'
+          replace_once(p,
+              '        const void* qw, const void* kw, const void* kmean, const void* vscale,\n'
+              '        const void* blen, float rope_eps, int rot_dim, int t0, int M,\n',
+              '        const void* qw, const void* kw, const void* kmean, const void* vscale,\n'
+              '        const void* key_bias, const void* blen, float rope_eps, int rot_dim, int t0, int M,\n')
+          replace_once(p,
+              '    std::optional<nb::ndarray<nb::device::cuda>> block_len = std::nullopt, int64_t token_aug = 0) {',
+              '    std::optional<nb::ndarray<nb::device::cuda>> block_len = std::nullopt, int64_t token_aug = 0,\n'
+              '    std::optional<nb::ndarray<nb::device::cuda>> key_bias = std::nullopt) {')
+          replace_once(p,
+              '    need_elems(vscale, batch * num_heads * 128, "sol_producer_chunk", "vscale");\n'
+              '    sol_producer_chunk(workspace.data(), qkv.data(), fab.data(), qw.data(),\n'
+              '                       kw.data(), kmean.data(), vscale.data(),\n'
+              '                       block_len ? block_len->data() : nullptr,\n',
+              '    need_elems(vscale, batch * num_heads * 128, "sol_producer_chunk", "vscale");\n'
+              '    if (key_bias) {\n'
+              '        if (key_bias->dtype() != nb::dtype<float>())\n'
+              '            throw std::runtime_error("sol_producer_chunk: key_bias must be float32");\n'
+              '        need_elems(*key_bias, batch * seq_len, "sol_producer_chunk", "key_bias");\n'
+              '        need_contiguous(*key_bias, "sol_producer_chunk", "key_bias");\n'
+              '    }\n'
+              '    sol_producer_chunk(workspace.data(), qkv.data(), fab.data(), qw.data(),\n'
+              '                       kw.data(), kmean.data(), vscale.data(),\n'
+              '                       key_bias ? key_bias->data() : nullptr,\n'
+              '                       block_len ? block_len->data() : nullptr,\n')
+          replace_once(p,
+              '          nb::arg("stream_ptr"), nb::arg("block_len") = nb::none(), nb::arg("token_aug") = 0);',
+              '          nb::arg("stream_ptr"), nb::arg("block_len") = nb::none(), nb::arg("token_aug") = 0,\n'
+              '          nb::arg("key_bias") = nb::none());')
+
+          p = 'comfy_kitchen/backends/cuda/__init__.py'
+          replace_once(p,
+              '    sink_blocks: list[int] | None = None,\n'
+              '    sink_q: list[int] | None = None,\n'
+              '    rope_eps: float = 1e-6,\n',
+              '    sink_blocks: list[int] | None = None,\n'
+              '    sink_q: list[int] | None = None,\n'
+              '    key_bias: torch.Tensor | None = None,\n'
+              '    rope_eps: float = 1e-6,\n')
+          replace_once(p,
+              '    width = 3 * h * d\n\n'
+              '    def produce(km, vsc):\n',
+              '    width = 3 * h * d\n'
+              '    kb = None\n'
+              '    if key_bias is not None:\n'
+              '        # exact branch only, in log2 units; biased blocks must be sink-covered\n'
+              '        kb = _normalize_key_bias(key_bias, 1, t, dev)\n'
+              '        kb = (kb * _LOG2E).expand(1, t).contiguous()\n\n'
+              '    def produce(km, vsc):\n')
+          replace_once(p,
+              '                block_len=None if block_len is None else _wrap_for_dlpack(block_len),\n'
+              '                token_aug=int(token_aug))\n',
+              '                block_len=None if block_len is None else _wrap_for_dlpack(block_len),\n'
+              '                token_aug=int(token_aug),\n'
+              '                key_bias=None if kb is None else _wrap_for_dlpack(kb))\n')
+          replace_once(p,
+              '    ``tail`` / ``block_len`` / ``coarse_gate`` / ``token_aug`` as in ``sol_attn``.\n\n'
+              '    ``qkv_chunks``: an iterable of chunks or a zero-arg callable returning one.\n',
+              '    ``tail`` / ``block_len`` / ``coarse_gate`` / ``token_aug`` as in ``sol_attn``.\n'
+              '    ``key_bias`` is natural-log per-key score bias and is consumed only by\n'
+              '    exact blocks; every biased key block must therefore be sink-routed.\n\n'
+              '    ``qkv_chunks``: an iterable of chunks or a zero-arg callable returning one.\n')
+          PY
+      - name: Static validation
+        run: |
+          python -m py_compile comfy_kitchen/backends/cuda/__init__.py
+          git diff --check
+      - name: Commit transformed CUDA sources
+        run: |
+          if git diff --quiet -- . ':(exclude).github/workflows/mixed-grid-key-bias-cuda-dev.yml'; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add comfy_kitchen/backends/cuda/__init__.py \
+                  comfy_kitchen/backends/cuda/dlpack_bindings.cpp \
+                  comfy_kitchen/backends/cuda/sage_attention/sol_attn.cu \
+                  comfy_kitchen/backends/cuda/sage_attention/sol_attn_producer.cu
+          git commit -m 'Add key bias to CUDA chunked Sol-Attn producer'
+          git push origin HEAD:mirror/mixed-grid-key-bias-20260910
