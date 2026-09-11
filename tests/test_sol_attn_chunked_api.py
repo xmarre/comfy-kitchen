@@ -13,7 +13,7 @@ _LEGACY_TAIL = [
 ]
 
 
-def _chunked_parameters(path: str) -> list[str]:
+def _chunked_signature(path: str) -> tuple[list[str], list[str]]:
     tree = ast.parse(Path(path).read_text())
     matches = [
         node
@@ -23,13 +23,17 @@ def _chunked_parameters(path: str) -> list[str]:
     ]
     assert len(matches) == 1
     fn = matches[0]
-    return [arg.arg for arg in (*fn.args.posonlyargs, *fn.args.args)]
+    positional = [arg.arg for arg in (*fn.args.posonlyargs, *fn.args.args)]
+    keyword_only = [arg.arg for arg in fn.args.kwonlyargs]
+    return positional, keyword_only
 
 
-def test_chunked_key_bias_is_appended_after_legacy_positional_tail():
+def test_chunked_key_bias_is_keyword_only_after_legacy_positional_tail():
     for path in (
         "comfy_kitchen/backends/cuda/__init__.py",
         "comfy_kitchen/backends/hip/__init__.py",
     ):
-        params = _chunked_parameters(path)
-        assert params[-6:] == [*_LEGACY_TAIL, "key_bias"]
+        positional, keyword_only = _chunked_signature(path)
+        assert positional[-5:] == _LEGACY_TAIL
+        assert "key_bias" not in positional
+        assert keyword_only == ["key_bias"]

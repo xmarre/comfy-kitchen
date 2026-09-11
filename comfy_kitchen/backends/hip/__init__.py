@@ -1958,6 +1958,7 @@ def sol_attn_chunked(
     block_len: torch.Tensor | None = None,
     coarse_gate: torch.Tensor | None = None,
     token_aug: int = 0,
+    *,
     key_bias: torch.Tensor | None = None,
 ):
     """Chunked-producer Sol-Attn over fused qkv projection chunks ([M, 3*H*128]
