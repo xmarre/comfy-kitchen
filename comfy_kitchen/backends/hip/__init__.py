@@ -1953,12 +1953,12 @@ def sol_attn_chunked(
     scale: float | None = None,
     sink_blocks: list[int] | None = None,
     sink_q: list[int] | None = None,
-    key_bias: torch.Tensor | None = None,
     rope_eps: float = 1e-6,
     tail: bool = True,
     block_len: torch.Tensor | None = None,
     coarse_gate: torch.Tensor | None = None,
     token_aug: int = 0,
+    key_bias: torch.Tensor | None = None,
 ):
     """Chunked-producer Sol-Attn over fused qkv projection chunks ([M, 3*H*128]
     bf16, 64-aligned starts, B=1); full Q/K/V are never materialised.
