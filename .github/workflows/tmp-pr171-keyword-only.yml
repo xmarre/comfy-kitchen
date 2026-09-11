@@ -1,0 +1,75 @@
+name: tmp-pr171-keyword-only
+
+on:
+  push:
+    branches:
+      - mirror/pr171-hostile-review-20260911
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: mirror/pr171-hostile-review-20260911
+
+      - name: Make key_bias keyword-only without moving legacy parameters
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          old = '''    token_aug: int = 0,\n    key_bias: torch.Tensor | None = None,\n):\n'''
+          new = '''    token_aug: int = 0,\n    *,\n    key_bias: torch.Tensor | None = None,\n):\n'''
+
+          for name in (
+              'comfy_kitchen/backends/cuda/__init__.py',
+              'comfy_kitchen/backends/hip/__init__.py',
+          ):
+              path = Path(name)
+              text = path.read_text()
+              if new in text:
+                  continue
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{name}: expected exactly one appended key_bias signature, found {count}')
+              path.write_text(text.replace(old, new, 1))
+
+          Path('tests/test_sol_attn_chunked_api.py').write_text('''from __future__ import annotations\n\nimport ast\nfrom pathlib import Path\n\n\n_LEGACY_TAIL = [\n    "rope_eps",\n    "tail",\n    "block_len",\n    "coarse_gate",\n    "token_aug",\n]\n\n\ndef _chunked_signature(path: str) -> tuple[list[str], list[str]]:\n    tree = ast.parse(Path(path).read_text())\n    matches = [\n        node\n        for node in tree.body\n        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))\n        and node.name == "sol_attn_chunked"\n    ]\n    assert len(matches) == 1\n    fn = matches[0]\n    positional = [arg.arg for arg in (*fn.args.posonlyargs, *fn.args.args)]\n    keyword_only = [arg.arg for arg in fn.args.kwonlyargs]\n    return positional, keyword_only\n\n\ndef test_chunked_key_bias_is_keyword_only_after_legacy_positional_tail():\n    for path in (\n        "comfy_kitchen/backends/cuda/__init__.py",\n        "comfy_kitchen/backends/hip/__init__.py",\n    ):\n        positional, keyword_only = _chunked_signature(path)\n        assert positional[-5:] == _LEGACY_TAIL\n        assert "key_bias" not in positional\n        assert keyword_only == ["key_bias"]\n''')
+          PY
+
+      - name: Validate edited Python sources
+        run: |
+          python -m compileall -q \
+            comfy_kitchen/backends/cuda/__init__.py \
+            comfy_kitchen/backends/hip/__init__.py \
+            tests/test_sol_attn_chunked_api.py
+          python - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              'test_sol_attn_chunked_api', 'tests/test_sol_attn_chunked_api.py'
+          )
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.test_chunked_key_bias_is_keyword_only_after_legacy_positional_tail()
+          PY
+          git diff --check
+
+      - name: Commit mirror fix
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No source/test changes to commit'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            comfy_kitchen/backends/cuda/__init__.py \
+            comfy_kitchen/backends/hip/__init__.py \
+            tests/test_sol_attn_chunked_api.py
+          git commit -m 'Make chunked key bias keyword-only'
+          git push origin HEAD:mirror/pr171-hostile-review-20260911
