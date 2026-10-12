@@ -34,8 +34,8 @@ def test_cuda_compiler_switch_removes_only_its_generated_backend_cache(tmp_path)
     hip.mkdir()
     (hip / "HIP_BUILD_SENTINEL").write_text("keep", encoding="utf-8")
     (cuda / "CMakeCache.txt").write_text(
-        "CMAKE_CUDA_COMPILER:FILEPATH=/usr/bin/nvcc\\n"
-        "COMFY_CUDA_ARCHS:UNINITIALIZED=75-real;80-real;120f\\n",
+        "CMAKE_CUDA_COMPILER:FILEPATH=/usr/bin/nvcc\n"
+        "COMFY_CUDA_ARCHS:UNINITIALIZED=75-real;80-real;120f\n",
         encoding="utf-8",
     )
     (cuda / "CMakeFiles").mkdir()
@@ -48,7 +48,7 @@ def test_cuda_compiler_switch_removes_only_its_generated_backend_cache(tmp_path)
 def test_unchanged_compiler_keeps_incremental_cmake_state(tmp_path):
     reset = _cache_reset()
     cache = tmp_path / "CMakeCache.txt"
-    cache.write_text("CMAKE_CUDA_COMPILER:FILEPATH=/opt/cuda/bin/nvcc\\n", encoding="utf-8")
+    cache.write_text("CMAKE_CUDA_COMPILER:FILEPATH=/opt/cuda/bin/nvcc\n", encoding="utf-8")
     (tmp_path / "CMakeFiles").mkdir()
     assert not reset(tmp_path, pathlib.Path("/opt/cuda/bin/nvcc"))
     assert cache.exists() and (tmp_path / "CMakeFiles").is_dir()
@@ -65,6 +65,6 @@ def test_partial_cache_invalidation_removes_residual_cmakefiles(tmp_path):
 def test_cache_without_cuda_compiler_is_preserved(tmp_path):
     reset = _cache_reset()
     cache = tmp_path / "CMakeCache.txt"
-    cache.write_text("COMFY_CUDA_ARCHS:UNINITIALIZED=120f\\n", encoding="utf-8")
+    cache.write_text("COMFY_CUDA_ARCHS:UNINITIALIZED=120f\n", encoding="utf-8")
     assert not reset(tmp_path, pathlib.Path("/opt/cuda/bin/nvcc"))
     assert cache.exists()
