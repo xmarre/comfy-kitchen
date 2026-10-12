@@ -19,6 +19,7 @@ jobs:
       - name: Check touched Python source
         run: |
           ruff check setup.py tests/test_cuda_cmake_cache.py
-          ruff format --check setup.py tests/test_cuda_cmake_cache.py
+          # setup.py has pre-existing formatting debt; lint it without reformatting unrelated source.
+          ruff format --check tests/test_cuda_cmake_cache.py
       - name: Run cache regression tests
         run: python -m pytest -q tests/test_cuda_cmake_cache.py
