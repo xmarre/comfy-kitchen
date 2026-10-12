@@ -35,9 +35,20 @@ def main():
     try:
         result = subprocess.run(["readelf", "-d", cuda._C.__file__],
                                 capture_output=True, text=True, check=False)
-        print("Extension CUDART DT_NEEDED:",
-              [line.strip() for line in result.stdout.splitlines() if "libcudart" in line],
-              flush=True)
+        needed = [line.strip() for line in result.stdout.splitlines() if "libcudart" in line]
+        print("Extension CUDART DT_NEEDED:", needed, flush=True)
+        import re
+        expected = torch.version.cuda.split(".", 1)[0]
+        majors = {
+            m.group(1) for line in needed
+            for m in re.finditer(r"libcudart\\.so\\.(\\d+)", line)
+        }
+        if majors != {expected}:
+            raise RuntimeError(
+                f"Invalid CUDA runtime-linkage A/B: extension CUDART majors={sorted(majors)} "
+                f"but PyTorch CUDA major={expected}; expected only libcudart.so.{expected}. "
+                "Refusing to interpret this as an interop test."
+            )
     except FileNotFoundError:
         print("readelf unavailable", flush=True)
     torch.manual_seed(0)
