@@ -222,9 +222,19 @@ target_include_directories(_C PRIVATE
 
 # Link libraries
 # Note: cuBLASLt is loaded dynamically at runtime via dlopen/LoadLibrary
-target_link_libraries(_C PRIVATE
-    CUDA::cudart_static
-)
+# Diagnostic Linux CUDA runtime-linkage A/B for issue #245.
+# This experimental branch links the native module against the shared CUDA
+# runtime. Production Kitchen continues to use cudart_static until the
+# owner confirms both runtime safety and wheel portability. Windows stays
+# on the unchanged static runtime to avoid introducing an unbundled DLL.
+if(UNIX AND NOT APPLE)
+    set_target_properties(comfy_kitchen_cuda_kernels PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
+    set_target_properties(_C PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
+    target_link_libraries(_C PRIVATE CUDA::cudart)
+    message(STATUS "DIAGNOSTIC #245: Linux shared CUDA runtime linkage enabled")
+else()
+    target_link_libraries(_C PRIVATE CUDA::cudart_static)
+endif()
 
 # On Windows, static cudart requires additional system libraries
 if(WIN32)
