@@ -41,7 +41,7 @@ def main():
         expected = torch.version.cuda.split(".", 1)[0]
         majors = {
             m.group(1) for line in needed
-            for m in re.finditer(r"libcudart\\.so\\.(\\d+)", line)
+            for m in re.finditer(r"libcudart\.so\.(\d+)", line)
         }
         if majors != {expected}:
             raise RuntimeError(
