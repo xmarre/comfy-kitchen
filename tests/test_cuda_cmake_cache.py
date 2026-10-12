@@ -1,8 +1,4 @@
-"""Regression coverage for setup.py's isolated CUDA CMake cache invalidation.
-
-The helper is extracted from the AST to avoid executing setuptools.setup() or
-probing a GPU merely to exercise the generated-build-directory policy.
-"""
+"""Validate compiler and Python interpreter cache switches without running CUDA."""
 
 import ast
 import os
@@ -10,26 +6,30 @@ import pathlib
 import shutil
 
 
+NVCC = pathlib.Path("/opt/conda/env/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc")
+PYTHON = pathlib.Path("/opt/conda/env/bin/python3.12")
+INCLUDE = pathlib.Path("/opt/conda/env/include/python3.12")
+
+
 def _cache_reset():
     setup_path = pathlib.Path(__file__).resolve().parents[1] / "setup.py"
-    ast_tree = ast.parse(setup_path.read_text(encoding="utf-8"))
-    candidates = [
-        node for node in ast_tree.body
+    tree = ast.parse(setup_path.read_text(encoding="utf-8"))
+    matches = [
+        node
+        for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name == "reset_cuda_cmake_cache_on_compiler_switch"
+        and node.name == "reset_cuda_cmake_cache_on_toolchain_switch"
     ]
-    assert len(candidates) == 1
+    assert len(matches) == 1
     scope = {"pathlib": pathlib, "os": os, "shutil": shutil}
-    code = compile(ast.Module(body=candidates, type_ignores=[]), str(setup_path), "exec")
-    exec(code, scope)
-    return scope[candidates[0].name]
+    exec(compile(ast.Module(body=matches, type_ignores=[]), str(setup_path), "exec"), scope)
+    return scope[matches[0].name]
 
 
-def test_cuda_compiler_switch_removes_only_its_generated_backend_cache(tmp_path):
+def test_cuda_compiler_switch_removes_only_generated_backend_cache(tmp_path):
     reset = _cache_reset()
     root = tmp_path / "build" / "temp.linux-x86_64-cpython-312"
-    cuda = root / "cuda"
-    hip = root / "hip"
+    cuda, hip = root / "cuda", root / "hip"
     cuda.mkdir(parents=True)
     hip.mkdir()
     (hip / "HIP_BUILD_SENTINEL").write_text("keep", encoding="utf-8")
@@ -40,17 +40,52 @@ def test_cuda_compiler_switch_removes_only_its_generated_backend_cache(tmp_path)
     )
     (cuda / "CMakeFiles").mkdir()
     (cuda / "CMakeFiles" / "old.txt").write_text("old", encoding="utf-8")
-    assert reset(cuda, pathlib.Path("/opt/conda/env/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc"))
+    assert reset(cuda, NVCC, PYTHON, INCLUDE)
     assert cuda.is_dir() and list(cuda.iterdir()) == []
     assert (hip / "HIP_BUILD_SENTINEL").read_text(encoding="utf-8") == "keep"
 
 
-def test_unchanged_compiler_keeps_incremental_cmake_state(tmp_path):
+def test_stale_internal_findpython_overrides_correct_public_python_argument(tmp_path):
     reset = _cache_reset()
     cache = tmp_path / "CMakeCache.txt"
-    cache.write_text("CMAKE_CUDA_COMPILER:FILEPATH=/opt/cuda/bin/nvcc\n", encoding="utf-8")
+    cache.write_text(
+        f"CMAKE_CUDA_COMPILER:FILEPATH={NVCC}\n"
+        f"Python_EXECUTABLE:UNINITIALIZED={PYTHON}\n"
+        "_Python_EXECUTABLE:INTERNAL=/usr/bin/python3.10\n"
+        "_Python_INCLUDE_DIR:INTERNAL=/usr/include/python3.10\n",
+        encoding="utf-8",
+    )
+    assert reset(tmp_path, NVCC, PYTHON, INCLUDE)
+    assert tmp_path.is_dir() and list(tmp_path.iterdir()) == []
+
+
+def test_stale_internal_python_include_invalidates_even_if_executables_match(tmp_path):
+    reset = _cache_reset()
+    cache = tmp_path / "CMakeCache.txt"
+    cache.write_text(
+        f"CMAKE_CUDA_COMPILER:FILEPATH={NVCC}\n"
+        f"Python_EXECUTABLE:FILEPATH={PYTHON}\n"
+        f"_Python_EXECUTABLE:INTERNAL={PYTHON}\n"
+        "_Python_INCLUDE_DIR:INTERNAL=/usr/include/python3.10\n",
+        encoding="utf-8",
+    )
+    assert reset(tmp_path, NVCC, PYTHON, INCLUDE)
+    assert not cache.exists()
+
+
+def test_unchanged_compiler_and_interpreter_keep_incremental_state(tmp_path):
+    reset = _cache_reset()
+    cache = tmp_path / "CMakeCache.txt"
+    cache.write_text(
+        f"CMAKE_CUDA_COMPILER:FILEPATH={NVCC}\n"
+        f"Python_EXECUTABLE:UNINITIALIZED={PYTHON}\n"
+        f"_Python_EXECUTABLE:INTERNAL={PYTHON}\n"
+        f"Python_INCLUDE_DIR:UNINITIALIZED={INCLUDE}\n"
+        f"_Python_INCLUDE_DIR:INTERNAL={INCLUDE}\n",
+        encoding="utf-8",
+    )
     (tmp_path / "CMakeFiles").mkdir()
-    assert not reset(tmp_path, pathlib.Path("/opt/cuda/bin/nvcc"))
+    assert not reset(tmp_path, NVCC, PYTHON, INCLUDE)
     assert cache.exists() and (tmp_path / "CMakeFiles").is_dir()
 
 
@@ -58,13 +93,13 @@ def test_partial_cache_invalidation_removes_residual_cmakefiles(tmp_path):
     reset = _cache_reset()
     (tmp_path / "CMakeFiles").mkdir()
     (tmp_path / "CMakeFiles" / "stale.txt").write_text("old", encoding="utf-8")
-    assert not reset(tmp_path, pathlib.Path("/opt/cuda/bin/nvcc"))
+    assert not reset(tmp_path, NVCC, PYTHON, INCLUDE)
     assert not (tmp_path / "CMakeFiles").exists()
 
 
-def test_cache_without_cuda_compiler_is_preserved(tmp_path):
+def test_cache_without_qualified_toolchain_artifacts_is_preserved(tmp_path):
     reset = _cache_reset()
     cache = tmp_path / "CMakeCache.txt"
     cache.write_text("COMFY_CUDA_ARCHS:UNINITIALIZED=120f\n", encoding="utf-8")
-    assert not reset(tmp_path, pathlib.Path("/opt/cuda/bin/nvcc"))
+    assert not reset(tmp_path, NVCC, PYTHON, INCLUDE)
     assert cache.exists()
