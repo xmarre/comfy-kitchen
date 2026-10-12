@@ -57,6 +57,38 @@ def cmake_path(path: str | os.PathLike[str]) -> str:
     return os.fspath(path).replace("\\", "/")
 
 
+def reset_cuda_cmake_cache_on_compiler_switch(build_dir: pathlib.Path, nvcc_bin: pathlib.Path) -> bool:
+    """Invalidate only generated backend CMake state when the CUDA compiler changes.
+
+    CMake's internal compiler-change retry clears the cache but also drops the
+    COMFY_CUDA_ARCHS argument from the original configure invocation. A source
+    wheel rebuild in the same checkout must invalidate the old compiler cache
+    *before* running CMake, rather than relying on that internal retry.
+    """
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        # A previous CMake-internal retry can leave CMakeFiles without its cache.
+        if (build_dir / "CMakeFiles").is_dir():
+            shutil.rmtree(build_dir / "CMakeFiles")
+        return False
+    cached = None
+    for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("CMAKE_CUDA_COMPILER:") and "=" in line:
+            cached = line.split("=", 1)[1].strip()
+            break
+    if not cached:
+        # Do not interfere with a valid cache before CUDA compiler discovery.
+        return False
+    previous = os.path.normcase(os.path.normpath(cached))
+    selected = os.path.normcase(os.path.normpath(os.fspath(nvcc_bin)))
+    if previous == selected:
+        return False
+    print(f"CUDA compiler changed: {cached} -> {nvcc_bin}; resetting CUDA CMake build cache")
+    shutil.rmtree(build_dir)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    return True
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, source_dir: str = "", backend: str = "cuda",
                  hip_archs: str = ""):
@@ -230,6 +262,7 @@ class CMakeBuildExt(build_ext):
             cuda_home, nvcc_bin = cuda_paths
             cmake_args.append(f"-DCUDAToolkit_ROOT={cmake_path(cuda_home)}")
             cmake_args.append(f"-DCMAKE_CUDA_COMPILER={cmake_path(nvcc_bin)}")
+            reset_cuda_cmake_cache_on_compiler_switch(build_temp, nvcc_bin)
 
             # FindCUDAToolkit only learned the Windows ARM64 library layout in
             # CMake 4.4. Help older CMake releases find cudart under lib/arm64;
