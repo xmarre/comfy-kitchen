@@ -1,0 +1,24 @@
+name: CUDA CMake Cache Regression
+
+on:
+  push:
+    branches:
+      - 'dev/sol-token-overflow-build-20261012'
+  workflow_dispatch:
+
+jobs:
+  cache-contract:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test tools
+        run: python -m pip install pytest ruff
+      - name: Check touched Python source
+        run: |
+          ruff check setup.py tests/test_cuda_cmake_cache.py
+          ruff format --check setup.py tests/test_cuda_cmake_cache.py
+      - name: Run cache regression tests
+        run: python -m pytest -q tests/test_cuda_cmake_cache.py
